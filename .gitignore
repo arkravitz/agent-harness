@@ -1,0 +1,8 @@
+node_modules/
+.DS_Store
+.env
+
+# Local runtime state: database, API keys, uploaded documents, task output
+data/*
+!data/.gitkeep
+*.log

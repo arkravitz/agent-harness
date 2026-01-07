@@ -1111,3 +1111,864 @@ async function renderMemory() {
   });
 }
 
+function openMemoryModal(memory) {
+  const modal = openModal({
+    eyebrow: 'Edit memory',
+    title: 'Update what the assistant remembers',
+    body: `<form id="memory-edit-form" class="form">
+      <label>Type<select name="category">
+        ${['fact', 'preference', 'project', 'person']
+          .map((category) => `<option value="${category}" ${memory.category === category ? 'selected' : ''}>${category[0].toUpperCase() + category.slice(1)}</option>`)
+          .join('')}
+      </select></label>
+      <label>Content<textarea name="content" rows="5" required maxlength="2000">${escapeHtml(memory.content)}</textarea></label>
+      <div class="form-actions"><button class="btn ghost" type="button" data-modal-close>Cancel</button><button class="btn" type="submit">Save memory</button></div>
+    </form>`
+  });
+  const form = modal.querySelector('form');
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = form.querySelector('[type="submit"]');
+    setBusy(button, true);
+    try {
+      await api.updateMemory(memory.id, {
+        content: form.elements.content.value,
+        category: form.elements.category.value
+      });
+      closeModal();
+      toast('Memory updated.', 'success');
+      route();
+    } catch (error) {
+      formError(form, error.message);
+      setBusy(button, false);
+    }
+  });
+}
+
+/* ------------------------------------------------------------------ library */
+
+async function renderLibrary() {
+  const serial = state.routeSerial;
+  const data = await api.prompts();
+  if (serial !== state.routeSerial) return;
+  const categories = ['All', ...new Set(data.templates.map((template) => template.category))];
+
+  app.innerHTML = renderShell(
+    'library',
+    `<div class="page">
+      ${pageHead({
+        eyebrow: 'Prompts translated from the guide',
+        title: 'Library',
+        subtitle: 'Roles, project instructions, and task prompts. Load one into a new chat, fill the brackets, and send.'
+      })}
+      <div class="filter-row" id="library-filters">
+        ${categories.map((category) => `<button class="filter ${category === 'All' ? 'active' : ''}" type="button" data-filter="${escapeHtml(category)}">${escapeHtml(category)}</button>`).join('')}
+      </div>
+      <div class="library-grid" id="library-grid">
+        ${data.templates
+          .map(
+            (template) => `<article class="library-card" data-category="${escapeHtml(template.category)}">
+              <div class="library-card-top"><span class="tag">${escapeHtml(template.category)}</span><span class="library-id">${escapeHtml(template.id)}</span></div>
+              <h2>${escapeHtml(template.title)}</h2>
+              <p>${escapeHtml(template.description)}</p>
+              <pre class="prompt-snippet">${escapeHtml(template.prompt)}</pre>
+              <div class="card-actions">
+                <button class="btn small" type="button" data-use-template="${template.id}">Use in chat</button>
+                <button class="btn ghost small" type="button" data-copy-template="${template.id}">${icon('copy', 14)} Copy</button>
+              </div>
+            </article>`
+          )
+          .join('')}
+      </div>
+    </div>`
+  );
+
+  document.querySelectorAll('[data-filter]').forEach((button) => {
+    button.addEventListener('click', () => {
+      document.querySelectorAll('[data-filter]').forEach((entry) => entry.classList.toggle('active', entry === button));
+      document.querySelectorAll('.library-card').forEach((card) => {
+        card.hidden = button.dataset.filter !== 'All' && card.dataset.category !== button.dataset.filter;
+      });
+    });
+  });
+
+  document.querySelectorAll('[data-copy-template]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const template = data.templates.find((entry) => entry.id === button.dataset.copyTemplate);
+      if (!template) return;
+      const ok = await copyText(template.prompt);
+      toast(ok ? 'Prompt copied.' : 'Could not copy.', ok ? 'success' : 'error');
+    });
+  });
+
+  document.querySelectorAll('[data-use-template]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const template = data.templates.find((entry) => entry.id === button.dataset.useTemplate);
+      if (!template) return;
+      try {
+        const { conversation } = await api.createConversation({ title: template.title });
+        sessionStorage.setItem('harness.draft', template.prompt);
+        location.hash = `#/chat/${conversation.id}`;
+      } catch (error) {
+        toast(error.message, 'error');
+      }
+    });
+  });
+}
+
+/* ------------------------------------------------------------------ automations */
+
+async function renderAutomations() {
+  const serial = state.routeSerial;
+  const [{ tasks }, projectData, skillData] = await Promise.all([api.tasks(), api.projects(), api.skills()]);
+  if (serial !== state.routeSerial) return;
+  const projects = projectData.projects;
+  const skills = skillData.skills;
+
+  const cards = tasks.length
+    ? tasks
+        .map((task) => {
+          const statusClass = task.lastStatus === 'error' ? 'error' : task.lastStatus === 'success' ? 'ok' : '';
+          return `<article class="task-card">
+            <div class="task-main">
+              <div class="task-title-row">
+                <span class="status-dot ${statusClass}"></span>
+                <h2>${escapeHtml(task.name)}</h2>
+                <span class="tag">${escapeHtml(task.scheduleLabel)}</span>
+                ${!task.enabled ? '<span class="tag muted">paused</span>' : ''}
+              </div>
+              <p class="task-prompt">${escapeHtml(truncate(task.prompt, 260))}</p>
+              <div class="task-meta">
+                <span>${task.nextRunAt ? `Next: ${formatDateTime(task.nextRunAt)}` : 'No next run'}</span>
+                <span>${task.lastRunAt ? `Last: ${timeAgo(task.lastRunAt)}` : 'Never run'}</span>
+                ${task.projectName ? `<span>${icon('folder', 13)} ${escapeHtml(task.projectName)}</span>` : ''}
+              </div>
+            </div>
+            <div class="task-actions">
+              <button class="btn small" type="button" data-run-task="${task.id}">${icon('play', 14)} Run now</button>
+              <button class="btn ghost small" type="button" data-task-history="${task.id}">History</button>
+              <button class="icon-btn tiny" type="button" data-edit-task="${task.id}" aria-label="Edit task">${icon('edit', 14)}</button>
+              <button class="icon-btn tiny" type="button" data-toggle-task="${task.id}" aria-label="${task.enabled ? 'Pause' : 'Enable'} task">${task.enabled ? '⏸' : '▶'}</button>
+              <button class="icon-btn tiny" type="button" data-delete-task="${task.id}" aria-label="Delete task">${icon('trash', 14)}</button>
+            </div>
+          </article>`;
+        })
+        .join('')
+    : emptyBlock(
+        'clock',
+        'Nothing scheduled yet',
+        'A scheduled task runs a prompt on a local timer and saves the output. The server has to be running.',
+        `<button class="btn" type="button" id="empty-new-task">Create a task</button>`
+      );
+
+  app.innerHTML = renderShell(
+    'automations',
+    `<div class="page">
+      ${pageHead({
+        eyebrow: 'Work while you are away',
+        title: 'Automations',
+        subtitle: 'Prompts that run on a local schedule and save their output. No cloud cron; the process has to be running.',
+        actions: `<button class="btn" type="button" id="new-task">${icon('plus', 16)} New task</button>`
+      })}
+      <div class="note-strip">${icon('clock', 16)}<span>Next runs are computed in <strong>${escapeHtml(Intl.DateTimeFormat().resolvedOptions().timeZone)}</strong> time. If a run is missed while the server is off, it runs once when the server starts again.</span></div>
+      <div class="task-list">${cards}</div>
+    </div>`
+  );
+
+  const openNew = () => openTaskModal({ projects, skills });
+  document.querySelector('#new-task')?.addEventListener('click', openNew);
+  document.querySelector('#empty-new-task')?.addEventListener('click', openNew);
+
+  document.querySelectorAll('[data-run-task]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      setBusy(button, true, 'Running…');
+      try {
+        const { run } = await api.runTask(button.dataset.runTask);
+        if (run.status === 'error') toast(run.error || 'Task failed.', 'error');
+        else toast('Task completed.', 'success');
+        await route();
+        await showTaskHistory(button.dataset.runTask, run.id);
+      } catch (error) {
+        toast(error.message, 'error');
+        setBusy(button, false);
+      }
+    });
+  });
+
+  document.querySelectorAll('[data-task-history]').forEach((button) => {
+    button.addEventListener('click', () => showTaskHistory(button.dataset.taskHistory));
+  });
+
+  document.querySelectorAll('[data-edit-task]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const task = tasks.find((entry) => entry.id === button.dataset.editTask);
+      if (task) openTaskModal({ task, projects, skills });
+    });
+  });
+
+  document.querySelectorAll('[data-toggle-task]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const task = tasks.find((entry) => entry.id === button.dataset.toggleTask);
+      if (!task) return;
+      await api.updateTask(task.id, { enabled: !task.enabled });
+      toast(task.enabled ? 'Task paused.' : 'Task enabled.');
+      route();
+    });
+  });
+
+  document.querySelectorAll('[data-delete-task]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      if (!confirm('Delete this scheduled task and its run history?')) return;
+      await api.deleteTask(button.dataset.deleteTask);
+      toast('Task deleted.');
+      route();
+    });
+  });
+}
+
+function openTaskModal({ task = null, projects = [], skills = [], template = null }) {
+  const scheduleKind = task?.scheduleKind || template?.scheduleKind || 'weekdays';
+  const scheduleValue = task?.scheduleValue || template?.scheduleValue || { time: '07:30' };
+  const body = `<form id="task-form" class="form">
+    <label>Name<input name="name" required maxlength="100" value="${escapeHtml(task?.name || template?.name || '')}" placeholder="Morning AI brief"></label>
+    <label>Prompt<textarea name="prompt" rows="8" required maxlength="20000" placeholder="What should run?">${escapeHtml(task?.prompt || template?.prompt || '')}</textarea></label>
+    <div class="schedule-fields">
+      <label>Schedule<select name="scheduleKind" id="schedule-kind">
+        <option value="daily" ${scheduleKind === 'daily' ? 'selected' : ''}>Every day</option>
+        <option value="weekdays" ${scheduleKind === 'weekdays' ? 'selected' : ''}>Weekdays</option>
+        <option value="hourly" ${scheduleKind === 'hourly' ? 'selected' : ''}>Every hour</option>
+        <option value="every_minutes" ${scheduleKind === 'every_minutes' ? 'selected' : ''}>Interval</option>
+      </select></label>
+      <label data-schedule-group="daily weekdays">Time<input type="time" name="time" value="${escapeHtml(scheduleValue.time || '07:30')}"></label>
+      <label data-schedule-group="hourly">Minute past the hour<input type="number" name="minute" min="0" max="59" value="${escapeHtml(String(scheduleValue.minute ?? 0))}"></label>
+      <label data-schedule-group="every_minutes">Every N minutes<input type="number" name="minutes" min="5" max="1440" value="${escapeHtml(String(scheduleValue.minutes ?? 60))}"></label>
+    </div>
+    <div class="row-2">
+      <label>Project<select name="projectId" id="task-project">
+        <option value="">None</option>
+        ${projects.map((project) => `<option value="${project.id}" ${task?.projectId === project.id ? 'selected' : ''}>${escapeHtml(project.name)}</option>`).join('')}
+      </select></label>
+      <label>Skill<select name="skillId">
+        <option value="">None</option>
+        ${skills.map((skill) => `<option value="${skill.id}" ${task?.skillId === skill.id ? 'selected' : ''}>${escapeHtml(skill.name)}</option>`).join('')}
+      </select></label>
+    </div>
+    <label class="check-row"><input type="checkbox" name="enabled" ${task ? (task.enabled ? 'checked' : '') : 'checked'}> Enabled</label>
+    <p class="form-hint">This runs only while the harness server is up. Output is saved under <code>data/outputs/</code>.</p>
+    <div class="form-actions"><button class="btn ghost" type="button" data-modal-close>Cancel</button><button class="btn" type="submit">${task ? 'Save task' : 'Create task'}</button></div>
+  </form>`;
+
+  const modal = openModal({
+    eyebrow: task ? 'Edit automation' : 'New automation',
+    title: task ? task.name : 'Schedule a prompt',
+    body,
+    wide: true
+  });
+  const form = modal.querySelector('form');
+  const kindSelect = modal.querySelector('#schedule-kind');
+
+  const updateGroups = () => {
+    modal.querySelectorAll('[data-schedule-group]').forEach((group) => {
+      group.hidden = !group.dataset.scheduleGroup.split(' ').includes(kindSelect.value);
+    });
+  };
+  kindSelect.addEventListener('change', updateGroups);
+  updateGroups();
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = form.querySelector('[type="submit"]');
+    setBusy(button, true);
+    const kind = kindSelect.value;
+    let value;
+    if (kind === 'daily' || kind === 'weekdays') value = { time: form.elements.time.value };
+    else if (kind === 'hourly') value = { minute: Number(form.elements.minute.value) };
+    else value = { minutes: Number(form.elements.minutes.value) };
+    const payload = {
+      name: form.elements.name.value,
+      prompt: form.elements.prompt.value,
+      scheduleKind: kind,
+      scheduleValue: value,
+      projectId: form.elements.projectId.value || null,
+      skillId: form.elements.skillId.value || null,
+      enabled: form.elements.enabled.checked
+    };
+    try {
+      if (task) await api.updateTask(task.id, payload);
+      else await api.createTask(payload);
+      closeModal();
+      toast(task ? 'Task saved.' : 'Task created.', 'success');
+      route();
+    } catch (error) {
+      formError(form, error.message);
+      setBusy(button, false);
+    }
+  });
+}
+
+async function showTaskHistory(taskId, highlightRunId = null) {
+  try {
+    const { task, runs } = await api.task(taskId);
+    const runHtml = runs.length
+      ? runs
+          .map(
+            (run) => `<details class="run" ${run.id === highlightRunId || (!highlightRunId && run === runs[0]) ? 'open' : ''}>
+              <summary><span class="status-dot ${run.status === 'error' ? 'error' : 'ok'}"></span>${formatDateTime(run.startedAt)} <span class="tag">${escapeHtml(run.status)}</span></summary>
+              ${run.error ? `<p class="run-error">${escapeHtml(run.error)}</p>` : ''}
+              ${run.output ? `<div class="run-output markdown">${renderMarkdown(run.output)}</div>` : ''}
+            </details>`
+          )
+          .join('')
+      : '<p class="muted">No runs yet.</p>';
+    openModal({
+      eyebrow: 'Run history',
+      title: task.name,
+      body: `<div class="run-list">${runHtml}</div>`,
+      wide: true
+    });
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+/* ------------------------------------------------------------------ skills */
+
+async function renderSkills() {
+  const serial = state.routeSerial;
+  const { skills } = await api.skills();
+  if (serial !== state.routeSerial) return;
+
+  const cards = skills.length
+    ? skills
+        .map(
+          (skill) => `<article class="skill-card">
+            <div class="skill-card-top"><span class="tag">SKILL.md</span><span class="library-id">skills/${escapeHtml(skill.id)}</span></div>
+            <h2>${escapeHtml(skill.name)}</h2>
+            <p>${escapeHtml(skill.description || 'No description.')}</p>
+            <div class="card-actions">
+              <button class="btn small" type="button" data-use-skill="${skill.id}">Use in chat</button>
+              <button class="btn ghost small" type="button" data-view-skill="${skill.id}">View</button>
+              <button class="icon-btn tiny" type="button" data-edit-skill="${skill.id}" aria-label="Edit skill">${icon('edit', 14)}</button>
+              <button class="icon-btn tiny" type="button" data-delete-skill="${skill.id}" aria-label="Delete skill">${icon('trash', 14)}</button>
+            </div>
+          </article>`
+        )
+        .join('')
+    : emptyBlock('layers', 'No skills', 'A skill is a Markdown instruction pack attached to a chat.', '');
+
+  app.innerHTML = renderShell(
+    'skills',
+    `<div class="page">
+      ${pageHead({
+        eyebrow: 'Reusable instructions',
+        title: 'Skills',
+        subtitle: 'Markdown packs that teach the model a specific job. Select one in the composer, or attach it to a scheduled task.',
+        actions: `<button class="btn" type="button" id="new-skill">${icon('plus', 16)} New skill</button>`
+      })}
+      <div class="skill-grid">${cards}</div>
+      <p class="page-foot">Skills live in <code>skills/&lt;id&gt;/SKILL.md</code>. They are plain files: edit them here or in your editor.</p>
+    </div>`
+  );
+
+  document.querySelector('#new-skill').addEventListener('click', () => openSkillModal());
+  document.querySelectorAll('[data-view-skill]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const skill = skills.find((entry) => entry.id === button.dataset.viewSkill);
+      if (skill) openSkillView(skill);
+    });
+  });
+  document.querySelectorAll('[data-edit-skill]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const skill = skills.find((entry) => entry.id === button.dataset.editSkill);
+      if (skill) openSkillModal(skill);
+    });
+  });
+  document.querySelectorAll('[data-delete-skill]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      if (!confirm('Delete this skill folder?')) return;
+      await api.deleteSkill(button.dataset.deleteSkill);
+      toast('Skill deleted.');
+      route();
+    });
+  });
+  document.querySelectorAll('[data-use-skill]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      try {
+        const { conversation } = await api.createConversation({ skillId: button.dataset.useSkill });
+        location.hash = `#/chat/${conversation.id}`;
+      } catch (error) {
+        toast(error.message, 'error');
+      }
+    });
+  });
+}
+
+function openSkillView(skill) {
+  const modal = openModal({
+    eyebrow: 'Skill',
+    title: skill.name,
+    wide: true,
+    body: `<p class="page-sub">${escapeHtml(skill.description || '')}</p>
+      <div class="skill-doc markdown">${renderMarkdown(skill.instructions)}</div>
+      <div class="form-actions"><button class="btn ghost" type="button" id="skill-edit-from-view">Edit skill</button><button class="btn" type="button" data-modal-close>Close</button></div>`
+  });
+  modal.querySelector('#skill-edit-from-view').addEventListener('click', () => {
+    closeModal();
+    openSkillModal(skill);
+  });
+}
+
+function openSkillModal(skill = null) {
+  const modal = openModal({
+    eyebrow: skill ? 'Edit skill' : 'New skill',
+    title: skill ? skill.name : 'Create a skill',
+    wide: true,
+    body: `<form id="skill-form" class="form">
+      <label>Name<input name="name" required maxlength="80" value="${escapeHtml(skill?.name || '')}" placeholder="Meeting notes"></label>
+      <label>Description<input name="description" maxlength="240" value="${escapeHtml(skill?.description || '')}" placeholder="What this skill is for"></label>
+      <label>Instructions<textarea name="instructions" rows="16" required maxlength="20000" placeholder="Markdown instructions the model should follow…">${escapeHtml(skill?.instructions || '')}</textarea></label>
+      <p class="form-hint">The file is written to <code>skills/&lt;slug&gt;/SKILL.md</code>.</p>
+      <div class="form-actions"><button class="btn ghost" type="button" data-modal-close>Cancel</button><button class="btn" type="submit">${skill ? 'Save skill' : 'Create skill'}</button></div>
+    </form>`
+  });
+  const form = modal.querySelector('form');
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = form.querySelector('[type="submit"]');
+    setBusy(button, true);
+    const payload = {
+      name: form.elements.name.value,
+      description: form.elements.description.value,
+      instructions: form.elements.instructions.value
+    };
+    try {
+      if (skill) await api.updateSkill(skill.id, payload);
+      else await api.createSkill(payload);
+      closeModal();
+      toast(skill ? 'Skill saved.' : 'Skill created.', 'success');
+      await refreshBoot();
+      route();
+    } catch (error) {
+      formError(form, error.message);
+      setBusy(button, false);
+    }
+  });
+}
+
+/* ------------------------------------------------------------------ artifacts */
+
+async function renderArtifacts() {
+  const serial = state.routeSerial;
+  const [{ artifacts }, projectData] = await Promise.all([api.artifacts(), api.projects()]);
+  if (serial !== state.routeSerial) return;
+  const projects = projectData.projects;
+  const cards = artifacts.length
+    ? artifacts
+        .map((artifact) => {
+          const project = projects.find((entry) => entry.id === artifact.projectId);
+          return `<article class="artifact-gallery-card" data-project="${artifact.projectId || ''}">
+            <button class="artifact-cover" type="button" data-artifact-open="${artifact.id}" aria-label="Preview ${escapeHtml(artifact.title)}">
+              <span class="artifact-cover-kind">${artifact.kind.toUpperCase()}</span>
+              <span class="artifact-cover-title">${escapeHtml(artifact.title)}</span>
+              <span class="artifact-cover-open">${icon('arrowRight', 16)} Open preview</span>
+            </button>
+            <div class="artifact-gallery-meta">
+              <div><strong>${escapeHtml(artifact.title)}</strong><small>${project ? `${escapeHtml(project.name)} · ` : ''}${formatDate(artifact.createdAt)}</small></div>
+              <button class="icon-btn tiny" type="button" data-delete-artifact="${artifact.id}" aria-label="Delete artifact">${icon('trash', 14)}</button>
+            </div>
+          </article>`;
+        })
+        .join('')
+    : emptyBlock('grid', 'No artifacts yet', 'Ask for an app, dashboard, landing page, or diagram. The model returns a self-contained file that is previewed in a sandbox.', `<a class="btn" href="#/chat/new">Start a chat</a>`);
+
+  app.innerHTML = renderShell(
+    'artifacts',
+    `<div class="page">
+      ${pageHead({
+        eyebrow: 'Things that run',
+        title: 'Artifacts',
+        subtitle: 'Self-contained HTML and SVG files built by the model. Previewed in a sandbox; stored in the local database.'
+      })}
+      ${
+        artifacts.length
+          ? `<div class="filter-row">
+              <select class="inline-select" id="artifact-project-filter" aria-label="Filter by project">
+                <option value="">All projects</option>
+                ${projects.map((project) => `<option value="${project.id}">${escapeHtml(project.name)}</option>`).join('')}
+              </select>
+              <span class="muted small">${plural(artifacts.length, 'artifact')}</span>
+            </div>`
+          : ''
+      }
+      <div class="artifact-gallery" id="artifact-gallery">${cards}</div>
+    </div>`
+  );
+
+  document.querySelector('#artifact-project-filter')?.addEventListener('change', (event) => {
+    const value = event.target.value;
+    document.querySelectorAll('.artifact-gallery-card').forEach((card) => {
+      card.hidden = Boolean(value) && card.dataset.project !== value;
+    });
+  });
+
+  document.querySelectorAll('[data-delete-artifact]').forEach((button) => {
+    button.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      if (!confirm('Delete this artifact?')) return;
+      await api.deleteArtifact(button.dataset.deleteArtifact);
+      toast('Artifact deleted.');
+      route();
+    });
+  });
+}
+
+/* ------------------------------------------------------------------ instructions */
+
+async function renderInstructions() {
+  const serial = state.routeSerial;
+  const [{ content }, projectData, skillData] = await Promise.all([api.instructions(), api.projects(), api.skills()]);
+  if (serial !== state.routeSerial) return;
+
+  app.innerHTML = renderShell(
+    'instructions',
+    `<div class="page">
+      ${pageHead({
+        eyebrow: 'Read before every chat',
+        title: 'Workspace instructions',
+        subtitle: 'The equivalent of CLAUDE.md or AGENTS.md. This file is injected into the system prompt for every conversation.'
+      })}
+      <div class="two-col">
+        <section class="panel">
+          <div class="panel-head"><h2>AGENTS.md</h2><span class="panel-note">workspace root</span></div>
+          <form id="instructions-form" class="form">
+            <textarea class="code-textarea" name="content" rows="24" spellcheck="false">${escapeHtml(content)}</textarea>
+            <div class="form-actions"><button class="btn" type="submit">Save instructions</button></div>
+          </form>
+        </section>
+        <aside class="stack">
+          <section class="panel">
+            <h2>Inspect the context</h2>
+            <p class="small muted">See the exact system prompt the model receives, including project documents, memory, and the selected skill.</p>
+            <form id="preview-form" class="form">
+              <label>Project<select name="projectId"><option value="">None</option>${projectData.projects
+                .map((project) => `<option value="${project.id}">${escapeHtml(project.name)}</option>`)
+                .join('')}</select></label>
+              <label>Skill<select name="skillId"><option value="">None</option>${skillData.skills
+                .map((skill) => `<option value="${skill.id}">${escapeHtml(skill.name)}</option>`)
+                .join('')}</select></label>
+              <label class="check-row"><input type="checkbox" name="thinking"> Include extended-thinking instruction</label>
+              <button class="btn ghost" type="submit">Preview context</button>
+            </form>
+          </section>
+          <section class="panel muted-panel">
+            <h2>How the prompt is assembled</h2>
+            <ol class="numbered">
+              <li>Base identity, response style, memory rules, artifact format.</li>
+              <li>Workspace instructions, project instructions, reference documents.</li>
+              <li>Memory, active skill, capability limits, session date.</li>
+              <li>The last 30 messages, capped to a character budget.</li>
+            </ol>
+          </section>
+        </aside>
+      </div>
+    </div>`
+  );
+
+  const form = document.querySelector('#instructions-form');
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = form.querySelector('[type="submit"]');
+    setBusy(button, true);
+    try {
+      await api.saveInstructions(form.elements.content.value);
+      sessionStorage.removeItem('harness.instructionsDirty');
+      toast('Workspace instructions saved.', 'success');
+      setBusy(button, false);
+    } catch (error) {
+      formError(form, error.message);
+      setBusy(button, false);
+    }
+  });
+
+  document.querySelector('#preview-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const previewForm = event.currentTarget;
+    const button = previewForm.querySelector('[type="submit"]');
+    setBusy(button, true, 'Building…');
+    try {
+      const result = await api.previewContext({
+        projectId: previewForm.elements.projectId.value || null,
+        skillId: previewForm.elements.skillId.value || null,
+        thinking: previewForm.elements.thinking.checked
+      });
+      openModal({
+        eyebrow: 'System prompt preview',
+        title: `${result.characters.toLocaleString()} characters · ~${result.estimatedTokens.toLocaleString()} tokens`,
+        wide: true,
+        body: `<pre class="context-preview">${escapeHtml(result.system)}</pre>`
+      });
+    } catch (error) {
+      toast(error.message, 'error');
+    } finally {
+      setBusy(button, false);
+    }
+  });
+}
+
+/* ------------------------------------------------------------------ settings */
+
+async function renderSettings() {
+  const serial = state.routeSerial;
+  const [{ settings }, boot] = await Promise.all([api.settings(), api.state()]);
+  if (serial !== state.routeSerial) return;
+  state.boot = { ...state.boot, state: boot };
+
+  const provider = settings.provider;
+  const keyPlaceholder = (name) => {
+    const entry = settings[name];
+    return entry.hasKey ? '•••••••• saved' : 'sk-…';
+  };
+
+  app.innerHTML = renderShell(
+    'settings',
+    `<div class="page page-narrow">
+      ${pageHead({
+        eyebrow: 'Connection and defaults',
+        title: 'Settings',
+        subtitle: 'Keys are written to data/config.json with file permissions 0600. They are never sent to the browser.'
+      })}
+
+      <section class="panel">
+        <div class="panel-head"><h2>Model provider</h2><span class="provider-state ${boot.provider.name === 'demo' ? 'warn' : 'ok'}">${icon(boot.provider.name === 'demo' ? 'warning' : 'check', 14)} ${escapeHtml(boot.provider.name === 'demo' ? 'Demo mode' : boot.provider.model)}</span></div>
+        ${boot.provider.warning ? `<div class="demo-banner compact">${icon('warning', 16)}<span>${escapeHtml(boot.provider.warning)}</span></div>` : ''}
+        <div class="provider-grid" id="provider-grid">
+          ${[
+            { id: 'auto', title: 'Auto', copy: 'Use the saved key, then an environment key, then demo.' },
+            { id: 'demo', title: 'Demo', copy: 'No calls. Canned replies for exploring the harness.' },
+            { id: 'openai', title: 'OpenAI-compatible', copy: 'OpenAI, DeepSeek, OpenRouter, LM Studio, Ollama /v1.' },
+            { id: 'anthropic', title: 'Anthropic', copy: 'Native Messages API. Adds extended thinking and prompt caching.' }
+          ]
+            .map(
+              (entry) => `<label class="provider-option ${provider === entry.id ? 'selected' : ''}" data-provider-option="${entry.id}">
+                <input type="radio" name="provider" value="${entry.id}" ${provider === entry.id ? 'checked' : ''}>
+                <strong>${entry.title}</strong><span>${entry.copy}</span>
+              </label>`
+            )
+            .join('')}
+        </div>
+
+        <div class="provider-panel form" data-provider-panel="openai" ${provider === 'openai' ? '' : 'hidden'}>
+          <div class="row-2">
+            <label>Base URL<input name="openaiBaseUrl" value="${escapeHtml(settings.openai.baseUrl)}" placeholder="https://api.openai.com/v1"></label>
+            <label>Model<input name="openaiModel" value="${escapeHtml(settings.openai.model)}" placeholder="gpt-4o-mini"></label>
+          </div>
+          <label>API key<input name="openaiApiKey" type="password" autocomplete="off" placeholder="${escapeHtml(keyPlaceholder('openai'))}"></label>
+          ${settings.openai.envKey ? `<p class="form-hint">A key is also available from the environment. The saved value wins if present.</p>` : ''}
+          <label class="check-row"><input type="checkbox" name="openaiClearKey"> Remove the saved OpenAI-compatible key</label>
+        </div>
+
+        <div class="provider-panel form" data-provider-panel="anthropic" ${provider === 'anthropic' ? '' : 'hidden'}>
+          <div class="row-2">
+            <label>Base URL<input name="anthropicBaseUrl" value="${escapeHtml(settings.anthropic.baseUrl)}" placeholder="https://api.anthropic.com"></label>
+            <label>Model<input name="anthropicModel" value="${escapeHtml(settings.anthropic.model)}" placeholder="claude-sonnet-4-5"></label>
+          </div>
+          <label>API key<input name="anthropicApiKey" type="password" autocomplete="off" placeholder="${escapeHtml(keyPlaceholder('anthropic'))}"></label>
+          ${settings.anthropic.envKey ? `<p class="form-hint">A key is also available from the environment. The saved value wins if present.</p>` : ''}
+          <label class="check-row"><input type="checkbox" name="anthropicClearKey"> Remove the saved Anthropic key</label>
+          <p class="form-hint">With Anthropic, stable system blocks are marked <code>cache_control: ephemeral</code>. Repeated context is cached server-side for five minutes, which is the prompt-caching feature from the guide.</p>
+        </div>
+
+        <div class="panel-sub form" id="preferences">
+          <h3>Preferences</h3>
+          <div class="row-2">
+            <label>Assistant name<input name="harnessName" value="${escapeHtml(settings.harnessName)}" maxlength="60"></label>
+            <label class="check-row standalone"><input type="checkbox" name="memoryEnabled" ${settings.memoryEnabled ? 'checked' : ''}> Include memory in chats</label>
+          </div>
+        </div>
+
+        <div class="form-actions">
+          <button class="btn" type="button" id="save-settings">Save settings</button>
+          <button class="btn ghost" type="button" id="test-settings">Save &amp; test connection</button>
+          <span class="settings-status" id="settings-status" role="status"></span>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>Local data</h2><span class="panel-note">v${escapeHtml(boot.version)}</span></div>
+        <div class="data-grid">
+          <div><span>Database</span><code>data/harness.db</code></div>
+          <div><span>Config + keys</span><code>data/config.json</code></div>
+          <div><span>Task output</span><code>data/outputs/</code></div>
+          <div><span>Workspace</span><code>${escapeHtml(boot.dataDir)}</code></div>
+        </div>
+        <div class="form-actions">
+          <a class="btn ghost small" href="/api/export">${icon('download', 14)} Export data as JSON</a>
+          <button class="btn ghost small" type="button" id="open-data-folder">Show path</button>
+        </div>
+        <p class="form-hint">The server binds to 127.0.0.1. There is no account, telemetry, or cloud sync. Model calls do leave the machine when a provider is connected.</p>
+      </section>
+
+      <section class="panel muted-panel">
+        <h2>Deliberately not included</h2>
+        <p class="small">Browser control, Gmail/Calendar connectors, a shell-based coding agent, and video editing are outside this MVP. They need OS-level access, OAuth apps, or global installs. The tradeoff is a harness that stays inside this folder and starts with one command.</p>
+      </section>
+    </div>`
+  );
+
+  const panels = document.querySelectorAll('[data-provider-panel]');
+  const updateProviderPanels = (value) => {
+    document.querySelectorAll('[data-provider-option]').forEach((option) => {
+      option.classList.toggle('selected', option.dataset.providerOption === value);
+    });
+    panels.forEach((panel) => {
+      panel.hidden = panel.dataset.providerPanel !== value;
+    });
+  };
+  document.querySelectorAll('input[name="provider"]').forEach((radio) => {
+    radio.addEventListener('change', () => updateProviderPanels(radio.value));
+  });
+
+  const save = async ({ test = false } = {}) => {
+    const status = document.querySelector('#settings-status');
+    const saveButton = document.querySelector('#save-settings');
+    const testButton = document.querySelector('#test-settings');
+    setBusy(test ? testButton : saveButton, true, test ? 'Testing…' : 'Saving…');
+    if (status) status.textContent = '';
+    const value = (name) => document.querySelector(`[name="${name}"]`)?.value ?? '';
+    const checked = (name) => Boolean(document.querySelector(`[name="${name}"]`)?.checked);
+    const selectedProvider = document.querySelector('input[name="provider"]:checked')?.value || 'auto';
+    const payload = {
+      provider: selectedProvider,
+      harnessName: value('harnessName'),
+      memoryEnabled: checked('memoryEnabled'),
+      openai: {
+        baseUrl: value('openaiBaseUrl'),
+        model: value('openaiModel')
+      },
+      anthropic: {
+        baseUrl: value('anthropicBaseUrl'),
+        model: value('anthropicModel')
+      }
+    };
+    if (value('openaiApiKey')) payload.openai.apiKey = value('openaiApiKey');
+    if (checked('openaiClearKey')) payload.openai.clearKey = true;
+    if (value('anthropicApiKey')) payload.anthropic.apiKey = value('anthropicApiKey');
+    if (checked('anthropicClearKey')) payload.anthropic.clearKey = true;
+
+    try {
+      await api.saveSettings(payload);
+      await refreshBoot();
+      if (!test) toast('Settings saved.', 'success');
+      if (status) status.textContent = test ? '' : 'Settings saved.';
+      if (test) {
+        const { result } = await api.testSettings();
+        if (status) {
+          status.textContent = result.ok ? `Connected to ${result.model} in ${result.latencyMs} ms.` : result.message;
+          status.className = `settings-status ${result.ok ? 'ok' : 'error'}`;
+        }
+        toast(result.ok ? `Connected to ${result.model}.` : result.message, result.ok ? 'success' : 'error');
+      }
+      setBusy(saveButton, false);
+      setBusy(testButton, false);
+      document.querySelectorAll('input[type="password"]').forEach((input) => {
+        input.value = '';
+        input.placeholder = '•••••••• saved';
+      });
+    } catch (error) {
+      if (status) {
+        status.textContent = error.message;
+        status.className = 'settings-status error';
+      }
+      toast(error.message, 'error');
+      setBusy(saveButton, false);
+      setBusy(testButton, false);
+    }
+  };
+
+  document.querySelector('#save-settings').addEventListener('click', () => save());
+  document.querySelector('#test-settings').addEventListener('click', () => save({ test: true }));
+  document.querySelector('#open-data-folder').addEventListener('click', async () => {
+    const ok = await copyText(boot.dataDir);
+    toast(ok ? 'Data path copied.' : boot.dataDir, ok ? 'success' : 'info');
+  });
+}
+
+/* ------------------------------------------------------------------ boot */
+
+async function refreshBoot() {
+  const [stateResponse, projectData, skillData] = await Promise.all([
+    api.state(),
+    api.projects(),
+    api.skills()
+  ]);
+  state.boot = {
+    state: stateResponse,
+    harnessName: stateResponse.harnessName,
+    projects: projectData.projects,
+    skills: skillData.skills
+  };
+  const chip = document.querySelector('.provider-chip');
+  if (chip) {
+    const provider = stateResponse.provider;
+    chip.className = `provider-chip ${provider.name === 'demo' ? 'warn' : 'ok'}`;
+    const label = chip.querySelector('span:last-child');
+    if (label) label.textContent = provider.name === 'demo' ? 'Demo mode' : provider.model;
+    chip.title = provider.warning || 'Model connection';
+  }
+}
+
+document.addEventListener('click', async (event) => {
+  const artifact = event.target.closest('[data-artifact-open]');
+  if (artifact) {
+    event.preventDefault();
+    await openArtifactModal(artifact.dataset.artifactOpen);
+    return;
+  }
+  const deleteChat = event.target.closest('[data-delete-chat]');
+  if (deleteChat) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!confirm('Delete this chat?')) return;
+    const deleteId = deleteChat.dataset.deleteChat;
+    try {
+      await api.deleteConversation(deleteId);
+      if (deleteId === state.chat?.id) location.hash = '#/chat/new';
+      else route();
+    } catch (error) {
+      toast(error.message, 'error');
+    }
+    return;
+  }
+  const copyMessage = event.target.closest('[data-copy-id]');
+  if (copyMessage) {
+    const content = state.copyMap.get(copyMessage.dataset.copyId);
+    if (content) {
+      const ok = await copyText(content);
+      toast(ok ? 'Reply copied.' : 'Could not copy.', ok ? 'success' : 'error');
+    }
+    return;
+  }
+  const copyCode = event.target.closest('.copy-code');
+  if (copyCode) {
+    const code = copyCode.closest('.code-block')?.querySelector('code')?.textContent || '';
+    const ok = await copyText(code);
+    toast(ok ? 'Code copied.' : 'Could not copy.', ok ? 'success' : 'error');
+  }
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && state.modalClose) {
+    state.modalClose();
+  }
+});
+
+window.addEventListener('hashchange', route);
+
+(async function init() {
+  try {
+    await refreshBoot();
+    await route();
+  } catch (error) {
+    app.innerHTML = `<div class="boot-error"><h1>Could not start</h1><p>${escapeHtml(error.message)}</p><p>Is the server running? Start it with <code>npm start</code>.</p></div>`;
+  }
+})();

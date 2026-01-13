@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0a0a0b">
+<title>Artifact · Agent Harness</title>
+<style>
+  :root { color-scheme: dark; --bg:#0a0a0b; --panel:#111113; --line:#27272b; --text:#f1eee7; --muted:#a29d94; --faint:#726d66; --accent:#e07a5f; --accent-soft:rgba(224,122,95,.12); }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--text); font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+  .identity { display: flex; align-items: center; gap: 11px; min-width: 0; }
+  .mark { display: inline-flex; align-items: flex-end; gap: 2px; height: 19px; flex: 0 0 auto; }
+  .mark i { display: block; width: 4px; border-radius: 2px; background: var(--accent); }
+  .mark i:nth-child(1) { height: 8px; opacity: .55; }
+  .mark i:nth-child(2) { height: 14px; opacity: .8; }
+  .mark i:nth-child(3) { height: 19px; }
+  .titles { min-width: 0; }
+  .eyebrow { margin: 0 0 1px; font-size: 8.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--accent); }
+  h1 { font-size: 13px; margin: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .actions { display: flex; align-items: center; gap: 6px; }
+  a.btn, button.btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--muted); font-size: 11px; text-decoration: none; cursor: pointer; }
+  a.btn:hover, button.btn:hover { color: var(--text); border-color: #3a3a40; }
+  main { flex: 1; min-height: 0; background: #08080a; position: relative; }
+  iframe { width: 100%; height: 100%; border: 0; display: block; }
+  .status { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 12px; color: var(--muted); font-size: 13px; }
+  .status.error { color: #f07f6e; }
+  .spinner { width: 22px; height: 22px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  code { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--faint); }
+</style>
+</head>
+<body>
+<header>
+  <div class="identity">
+    <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>
+    <div class="titles">
+      <p class="eyebrow" id="kind">Artifact</p>
+      <h1 id="title">Loading…</h1>
+    </div>
+  </div>
+  <div class="actions">
+    <a class="btn" href="/#/artifacts">Open in harness</a>
+    <a class="btn" id="download" href="#" download>Download</a>
+  </div>
+</header>
+<main id="main">
+  <div class="status" id="status"><span class="spinner"></span><span>Loading artifact…</span></div>
+</main>
+<script type="module">
+  import {
+    buildArtifactDocument,
+    loadArtifactStorage,
+    randomToken,
+    saveArtifactStorage
+  } from '/js/artifact-view.js';
+
+  const id = location.pathname.split('/').filter(Boolean).pop();
+  const main = document.querySelector('#main');
+  const titleEl = document.querySelector('#title');
+  const kindEl = document.querySelector('#kind');
+  const download = document.querySelector('#download');
+  const token = randomToken();
+
+  window.addEventListener('message', (event) => {
+    const data = event.data;
+    if (!data || !data.__harnessArtifact) return;
+    if (data.token !== token || data.id !== id) return;
+    saveArtifactStorage(id, data.data);
+  });
+
+  try {
+    const response = await fetch(`/api/artifacts/${encodeURIComponent(id)}`);
+    if (!response.ok) throw new Error('Artifact not found.');
+    const { artifact } = await response.json();
+    document.title = `${artifact.title} · Agent Harness`;
+    titleEl.textContent = artifact.title;
+    kindEl.textContent = `${artifact.kind.toUpperCase()} artifact · sandboxed`;
+    download.href = `/api/artifacts/${encodeURIComponent(id)}/download`;
+    download.download = `${artifact.title}.${artifact.kind === 'svg' ? 'svg' : 'html'}`;
+    const frame = document.createElement('iframe');
+    frame.title = artifact.title;
+    frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals allow-popups allow-downloads');
+    frame.srcdoc = buildArtifactDocument(artifact, loadArtifactStorage(id), token);
+    main.innerHTML = '';
+    main.append(frame);
+  } catch (error) {
+    main.innerHTML = '';
+    const box = document.createElement('div');
+    box.className = 'status error';
+    const heading = document.createElement('strong');
+    heading.textContent = 'Could not load this artifact.';
+    const message = document.createElement('span');
+    message.textContent = error.message;
+    const code = document.createElement('code');
+    code.textContent = id || '';
+    box.append(heading, message, code);
+    main.append(box);
+  }
+</script>
+</body>
+</html>
